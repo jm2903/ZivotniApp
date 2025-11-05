@@ -1,8 +1,9 @@
 from __future__ import annotations
-import sqlite3, os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Optional
+from collections import defaultdict
+from supabase_handler import supabase
 
 try:
     from zoneinfo import ZoneInfo
@@ -10,17 +11,10 @@ try:
 except Exception:
     TZ = None
 
-DB_PATH = "progress.db"
 
-
-@dataclass
-class Task:
-    id: Optional[int]
-    name: str
-    points: float
-    description: str
-    ts: str
-
+# =====================
+#   OSNOVNE POMOĆNE
+# =====================
 
 def _now_iso() -> str:
     if TZ:
@@ -28,68 +22,68 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def init_db(path: str = DB_PATH) -> None:
-    conn = sqlite3.connect(path)
+# =====================
+#   MODEL
+# =====================
+
+@dataclass
+class Task:
+    id: Optional[int]
+    task: str
+    points: float
+    note: str
+    date: str
+
+
+# =====================
+#   PROGRESS (ZADACI)
+# =====================
+
+def add_task(task: str, points: float, description: str = ""):
+    """Dodaje zadatak u Supabase."""
+    data = {
+        "date": _now_iso()[:10],
+        "task": task,
+        "points": points,
+        "note": description,
+    }
     try:
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS tasks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                points REAL NOT NULL,
-                description TEXT,
-                ts TEXT NOT NULL
-            )
-        """)
-        conn.commit()
-    finally:
-        conn.close()
+        supabase.table("progress").insert(data).execute()
+    except Exception as e:
+        print(f"[Supabase] Insert error: {e}")
 
 
-def add_task(name: str, points: float, description: str = "", ts: Optional[str] = None, path: str = DB_PATH) -> int:
-    if ts is None:
-        ts = _now_iso()
-    conn = sqlite3.connect(path)
+def list_tasks() -> List[Task]:
+    """Vraća sve zadatke iz Supabase tablice 'progress'."""
     try:
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO tasks(name, points, description, ts) VALUES (?, ?, ?, ?)",
-            (name, points, description, ts),
-        )
-        conn.commit()
-        return cur.lastrowid
-    finally:
-        conn.close()
+        res = supabase.table("progress").select("*").order("id", desc=False).execute()
+        return res.data or []
+    except Exception as e:
+        print(f"[Supabase] list_tasks error: {e}")
+        return []
 
 
-def delete_task(task_id: int, path: str = DB_PATH) -> None:
-    conn = sqlite3.connect(path)
+def delete_task(task_id: int) -> None:
+    """Briše zadatak iz Supabase."""
     try:
-        conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
-        conn.commit()
-    finally:
-        conn.close()
+        supabase.table("progress").delete().eq("id", int(task_id)).execute()
+    except Exception as e:
+        print(f"[Supabase] Delete error: {e}")
 
 
-def list_tasks(path: str = DB_PATH) -> List[Task]:
-    conn = sqlite3.connect(path)
+def total_points() -> float:
+    """Računa ukupne bodove iz Supabase."""
     try:
-        rows = conn.execute("SELECT id,name,points,description,ts FROM tasks ORDER BY ts DESC").fetchall()
-        return [Task(*r) for r in rows]
-    finally:
-        conn.close()
+        res = supabase.table("progress").select("points").execute()
+        return round(sum(float(r.get("points") or 0) for r in (res.data or [])), 2)
+    except Exception as e:
+        print(f"[Supabase] total_points error: {e}")
+        return 0.0
 
 
-def total_points(path: str = DB_PATH) -> float:
-    conn = sqlite3.connect(path)
-    try:
-        (s,) = conn.execute("SELECT COALESCE(SUM(points),0) FROM tasks").fetchone()
-        return float(s or 0.0)
-    finally:
-        conn.close()
-
-
-# --- PREDEFINIRANI ZADACI ---
+# =====================
+#   PREDEFINIRANI / POSEBNI ZADACI
+# =====================
 
 PREDEFINED = [
     ("Izgradnja/kupovina stana/kuće", 350.0),
@@ -104,119 +98,106 @@ PREDEFINED = [
     ("Selidba od roditelja", 40.0),
 ]
 
-def add_predefined(name: str, description: str = "", path: str = DB_PATH) -> int:
+
+def add_predefined(name: str, description: str = ""):
     mapping = {n: p for n, p in PREDEFINED}
     if name not in mapping:
         raise ValueError(f"Nepoznat predefinirani zadatak: {name}")
-    return add_task(name, mapping[name], description, path=path)
+    add_task(name, mapping[name], description)
 
 
-def add_investment(amount_eur: float, description: str = "", path: str = DB_PATH) -> int:
+def add_investment(amount_eur: float, description: str = ""):
     """Dodaje zadatak za ulaganje u dionice – 1 bod na svakih 1000 €."""
     points = amount_eur / 1000.0
     name = f"Uloženo u dionice {amount_eur:,.0f} €".replace(",", ".")
-    return add_task(name, points, description, path=path)
+    add_task(name, points, description)
 
-# --- TO-DO LISTA ---
-def init_todo_db(path: str = DB_PATH) -> None:
-    conn = sqlite3.connect(path)
+
+# =====================
+#   TO-DO LISTA (u Supabase)
+# =====================
+
+def add_todo(title: str):
+    """Dodaje To-Do zadatak u Supabase tablicu 'todos'."""
     try:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS todos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                done INTEGER DEFAULT 0,
-                ts_created TEXT NOT NULL
-            )
-        """)
-        conn.commit()
-    finally:
-        conn.close()
+        supabase.table("todos").insert({
+            "title": title,
+            "done": False,
+            "ts_created": _now_iso()
+        }).execute()
+    except Exception as e:
+        print(f"[Supabase] add_todo error: {e}")
 
 
-def add_todo(title: str, path: str = DB_PATH) -> int:
-    conn = sqlite3.connect(path)
+def list_todos():
+    """Dohvaća sve To-Do zadatke iz Supabase."""
     try:
-        cur = conn.cursor()
-        cur.execute("INSERT INTO todos (title, done, ts_created) VALUES (?, 0, ?)", (title, _now_iso()))
-        conn.commit()
-        return cur.lastrowid
-    finally:
-        conn.close()
+        res = supabase.table("todos").select("*").order("id", desc=True).execute()
+        return res.data or []
+    except Exception as e:
+        print(f"[Supabase] list_todos error: {e}")
+        return []
 
 
-def list_todos(path: str = DB_PATH):
-    conn = sqlite3.connect(path)
+def mark_todo_done(todo_id: int):
+    """Označi zadatak dovršenim i dodaj 0.2 boda u progress."""
     try:
-        rows = conn.execute("SELECT id,title,done,ts_created FROM todos ORDER BY id DESC").fetchall()
-        return [{"id": r[0], "title": r[1], "done": bool(r[2]), "ts": r[3]} for r in rows]
-    finally:
-        conn.close()
+        # Dohvati naslov
+        res = supabase.table("todos").select("title").eq("id", int(todo_id)).execute()
+        title = res.data[0]["title"] if res.data else f"To-Do {todo_id}"
+
+        # Označi dovršenim
+        supabase.table("todos").update({"done": True}).eq("id", int(todo_id)).execute()
+
+        # Dodaj bodove u progress
+        add_task("Dnevni zadatak", 0.2, title)
+    except Exception as e:
+        print(f"[Supabase] mark_todo_done error: {e}")
 
 
-def mark_todo_done(todo_id: int, path: str = DB_PATH):
-    """Označi dovršen i doda dnevni zadatak s opisom."""
-    conn = sqlite3.connect(path)
+def delete_todo(todo_id: int):
+    """Briše To-Do zadatak."""
     try:
-        cur = conn.cursor()
-        cur.execute("SELECT title FROM todos WHERE id=?", (todo_id,))
-        row = cur.fetchone()
-        title = row[0] if row else f"To-Do {todo_id}"
-        cur.execute("UPDATE todos SET done=1 WHERE id=?", (todo_id,))
-        conn.commit()
-    finally:
-        conn.close()
-    add_task("Dnevni zadatak", 0.2, title, path=path)
+        supabase.table("todos").delete().eq("id", int(todo_id)).execute()
+    except Exception as e:
+        print(f"[Supabase] delete_todo error: {e}")
 
 
-def delete_todo(todo_id: int, path: str = DB_PATH):
-    conn = sqlite3.connect(path)
-    try:
-        conn.execute("DELETE FROM todos WHERE id=?", (todo_id,))
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def reset_completed_todos(path: str = DB_PATH):
-    """Automatski briše sve dovršene to-do zadatke starije od 1 dana."""
-    conn = sqlite3.connect(path)
+def reset_completed_todos():
+    """Automatski briše To-Do zadatke starije od 1 dana koji su označeni kao dovršeni."""
     try:
         cutoff = (datetime.now(TZ) - timedelta(days=1)).isoformat(timespec="seconds")
-        conn.execute("DELETE FROM todos WHERE done=1 AND ts_created < ?", (cutoff,))
-        conn.commit()
-    finally:
-        conn.close()
+        res = supabase.table("todos").select("id,ts_created").execute()
+        for todo in (res.data or []):
+            if todo.get("done") and todo.get("ts_created") < cutoff:
+                supabase.table("todos").delete().eq("id", todo["id"]).execute()
+    except Exception as e:
+        print(f"[Supabase] reset_completed_todos error: {e}")
 
 
-# --- RESET ---
-def reset_all_data(path: str = DB_PATH):
-    if os.path.exists(path):
-        os.remove(path)
-    init_db(path)
-    init_todo_db(path)
+# =====================
+#   STATISTIKA
+# =====================
 
-
-# --- STATISTIKA / KALENDAR ---
-def points_per_day(path: str = DB_PATH):
-    """Vraća dict {datum: suma_bodova}"""
-    conn = sqlite3.connect(path)
+def points_per_day() -> dict:
+    """Vraća dict {datum: suma_bodova} iz Supabase tablice 'progress'."""
+    per_day = defaultdict(float)
     try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT substr(ts,1,10) as day, SUM(points)
-            FROM tasks
-            GROUP BY day
-            ORDER BY day
-        """)
-        return {r[0]: r[1] for r in cur.fetchall()}
-    finally:
-        conn.close()
+        res = supabase.table("progress").select("date,points").execute()
+        for r in (res.data or []):
+            d = (r.get("date") or "")[:10]
+            if not d:
+                continue
+            per_day[d] += float(r.get("points") or 0)
+    except Exception as e:
+        print(f"[Supabase] points_per_day error: {e}")
+        return {}
+    return dict(sorted(per_day.items(), key=lambda x: x[0]))
 
 
-def streak_days(path: str = DB_PATH) -> int:
-    """Računa koliko dana zaredom imaš barem jedan zadatak."""
-    days = list(points_per_day(path).keys())
+def streak_days() -> int:
+    """Računa koliko dana zaredom imaš barem jedan zadatak (iz Supabase)."""
+    days = list(points_per_day().keys())
     if not days:
         return 0
     days = [datetime.fromisoformat(d) for d in days]
